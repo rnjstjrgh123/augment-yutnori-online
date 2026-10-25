@@ -9,6 +9,7 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 const rooms = new Map();
 const code = () => crypto.randomBytes(3).toString("hex").toUpperCase();
@@ -30,10 +31,10 @@ function emitRoom(r) {
 }
 function initState(r) {
   return {
-    turnIndex:0, pending:[], currentResult:null, gameOver:false, winner:null,
+    turnIndex:0, pending:[], currentResult:null, extraRolls:0, gameOver:false, winner:null,
     players:r.players.map((p,i)=>({
       id:p.id,name:p.name,color:["#5aa9ff","#ff6868","#65d79a","#ffd064","#c78aff","#ff9d52","#5de0d5","#eee"][i],
-      pieces:Array(r.pieceCount).fill(null), finished:0
+      pieces:Array(r.pieceCount).fill(null), finished:0, augment:["fortune","capturer","guardian","swift"][i%4], augmentUsed:false, shieldUsed:false
     })),
     lastRoll:null, log:[`${r.name} 방이 시작되었습니다.`]
   };
@@ -50,9 +51,9 @@ function nextTurn(r) {
   r.state.pending=[]; r.state.currentResult=null;
   r.state.turnIndex=(r.state.turnIndex+1)%r.state.players.length;
 }
-function rollResult() {
-  // Simple demo distribution; replace with validated stick-face logic in rules module.
+function rollResult(player) {
   const rolls=[{name:"도",value:1},{name:"개",value:2},{name:"개",value:2},{name:"걸",value:3},{name:"걸",value:3},{name:"윷",value:4},{name:"모",value:5},{name:"빽도",value:-1}];
+  if(player && player.augment === "fortune") rolls.push({name:"윷",value:4},{name:"모",value:5});
   return rolls[Math.floor(Math.random()*rolls.length)];
 }
 io.on("connection", socket => {
@@ -115,13 +116,13 @@ io.on("connection", socket => {
     if(!r||!r.started||r.state.gameOver) return ack({ok:false,error:"게임을 진행할 수 없습니다."});
     const p=currentPlayer(r);
     if(p.id!==socket.id) return ack({ok:false,error:"현재 차례가 아닙니다."});
-    if(r.state.currentResult) return ack({ok:false,error:"먼저 선택한 결과로 말을 이동하세요."});
-    const result=rollResult();
+    if(r.state.currentResult || r.state.pending.length) return ack({ok:false,error:"먼저 나온 윷 결과를 사용해 말을 이동하세요."});
+    if(r.state.extraRolls>0) r.state.extraRolls--;
+    const result=rollResult(p);
     r.state.pending.push(result); r.state.lastRoll=result;
+    if(result.name==="윷" || result.name==="모") r.state.extraRolls++;
     logState(r,`${p.name}: ${result.name} (${result.value>0?"+":""}${result.value})`);
-    if(!["윷","모"].includes(result.name)) {
-      // The player may still choose any queued result before ending the turn.
-    }
+    if(result.name==="윷" || result.name==="모") logState(r,`${result.name}! 추가 던지기 기회가 생겼습니다.`);
     broadcastGame(r); ack({ok:true,result});
   });
 
@@ -145,29 +146,41 @@ io.on("connection", socket => {
     const old=p.pieces[idx];
     if(old!==null && old>=19) return ack({ok:false,error:"이미 완주한 말입니다."});
     if(res.value<0 && old===null) return ack({ok:false,error:"빽도는 출발한 말이 있어야 사용할 수 있습니다."});
-    const target=old===null ? Math.max(0,res.value-1) : old+res.value;
+    let target=old===null ? Math.max(0,res.value-1) : old+res.value;
+    if(p.augment==="swift" && !p.augmentUsed && res.value>0 && (old===null || old===0)) {
+      target+=1; p.augmentUsed=true; logState(r,`${p.name}의 증강 [질주] 발동: 한 칸 추가 이동!`);
+    }
     if(target>=19) { p.pieces[idx]=19; p.finished++; logState(r,`${p.name}의 말 ${idx+1} 완주!`); }
     else p.pieces[idx]=Math.max(0,target);
 
-    // Basic capture on same linear track. Full branch/stack rules are a later rules-engine task.
+    let captured=false;
     if(p.pieces[idx]!==19) {
       const landed=p.pieces[idx];
       r.state.players.forEach(other=>{
-        if(other.id!==p.id) other.pieces=other.pieces.map((pos,j)=>{
-          if(pos===landed){logState(r,`${p.name}이 상대 말을 잡았습니다!`);return null;} return pos;
+        if(other.id===p.id) return;
+        other.pieces=other.pieces.map(pos=>{
+          if(pos!==landed) return pos;
+          if(other.augment==="guardian" && !other.shieldUsed) {
+            other.shieldUsed=true; logState(r,`${other.name}의 증강 [수호 부적]이 포획을 막았습니다!`); return pos;
+          }
+          captured=true; logState(r,`${p.name}이 ${other.name}의 말을 잡았습니다!`); return null;
         });
       });
       const stack=p.pieces.filter(pos=>pos===landed).length;
       if(stack>1) logState(r,`말 업기 ×${stack}`);
     }
-    const chosen=res;
+    if(captured) {
+      const bonus=p.augment==="capturer"?2:1;
+      r.state.extraRolls+=bonus;
+      logState(r,`${p.name} 포획 보너스: 추가 던지기 ${bonus}회!`);
+    }
     r.state.currentResult=null;
     if(p.finished>=p.pieces.length) {
       r.state.gameOver=true; r.state.winner=p.name; logState(r,`${p.name} 승리!`);
-    } else if(!r.state.pending.length && !["윷","모"].includes(chosen.name)) {
-      nextTurn();
-    } else if(!r.state.pending.length && ["윷","모"].includes(chosen.name)) {
-      // Keep turn and allow the bonus throw.
+    } else if(!r.state.pending.length && r.state.extraRolls===0) {
+      nextTurn(); logState(r,`${currentPlayer(r).name} 차례`);
+    } else if(!r.state.pending.length) {
+      logState(r,`${p.name} 추가 던지기 차례 (${r.state.extraRolls}회 남음)`);
     }
     broadcastGame(r); ack({ok:true});
   });
@@ -176,7 +189,8 @@ io.on("connection", socket => {
     const r=rooms.get(socket.data.roomId);
     if(!r||!r.started||r.state.gameOver) return ack({ok:false,error:"턴을 종료할 수 없습니다."});
     if(currentPlayer(r).id!==socket.id) return ack({ok:false,error:"현재 차례가 아닙니다."});
-    if(r.state.currentResult) return ack({ok:false,error:"선택한 결과로 말을 먼저 이동하세요."});
+    if(r.state.currentResult || r.state.pending.length) return ack({ok:false,error:"나온 윷 결과를 먼저 사용하세요."});
+    if(r.state.extraRolls>0) return ack({ok:false,error:`추가 던지기 ${r.state.extraRolls}회가 남아 있어 턴을 종료할 수 없습니다.`});
     nextTurn(); logState(r,`${currentPlayer(r).name} 차례`);
     broadcastGame(r); ack({ok:true});
   });

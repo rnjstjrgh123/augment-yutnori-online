@@ -1,8 +1,8 @@
 {
   "name": "augment-yutnori-online",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Server-backed multiplayer starter for Augment Yutnori",
+  "description": "Mobile-ready multiplayer Augment Yutnori prototype",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
