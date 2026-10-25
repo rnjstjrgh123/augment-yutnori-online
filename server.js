@@ -125,7 +125,20 @@ io.on("connection", socket => {
     if(r.state.currentResult || r.state.pending.length) return ack({ok:false,error:"먼저 나온 윷 결과를 사용해 말을 이동하세요."});
     if(r.state.extraRolls>0) r.state.extraRolls--;
     const result=rollResult(p);
-    r.state.pending.push(result); r.state.lastRoll=result;
+    r.state.lastRoll=result;
+    const hasBoardPiece=p.pieces.some(pos=>pos!==null && pos<19);
+    if(result.name==="빽도" && !hasBoardPiece) {
+      // No active piece can use back-do: consume it and immediately pass the turn.
+      r.state.pending=[];
+      r.state.currentResult=null;
+      r.state.extraRolls=0;
+      logState(r,`${p.name}: 빽도 — 판 위에 말이 없어 턴을 넘깁니다.`);
+      nextTurn();
+      logState(r,`${currentPlayer(r).name} 차례`);
+      broadcastGame(r);
+      return ack({ok:true,result,skipped:true});
+    }
+    r.state.pending.push(result);
     if(result.name==="윷" || result.name==="모") r.state.extraRolls++;
     logState(r,`${p.name}: ${result.name} (${result.value>0?"+":""}${result.value})`);
     if(result.name==="윷" || result.name==="모") logState(r,`${result.name}! 추가 던지기 기회가 생겼습니다.`);
