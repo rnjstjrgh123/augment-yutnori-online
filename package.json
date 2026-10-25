@@ -1,6 +1,6 @@
 {
   "name": "augment-yutnori-online",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Mobile-ready multiplayer Augment Yutnori prototype",
   "main": "server.js",
