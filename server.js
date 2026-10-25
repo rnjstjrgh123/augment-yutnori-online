@@ -19,7 +19,7 @@ function publicRoom(r) {
     id:r.id, name:r.name, mode:r.mode, maxPlayers:r.maxPlayers,
     pieceCount:r.pieceCount, hasPassword:!!r.password,
     players:r.players.map(p=>({id:p.id,name:p.name,ready:p.ready,host:p.id===r.hostId,augment:p.augment||null,augmentLocked:!!p.augmentLocked})),
-    started:r.started, code:r.id
+    started:r.started, phase:r.phase||"lobby", code:r.id
   };
 }
 function listRooms() {
@@ -74,7 +74,7 @@ io.on("connection", socket => {
       maxPlayers,pieceCount,
       privacy:data.privacy==="private"?"private":"public",
       password:String(data.password||"").slice(0,64),
-      hostId:socket.id, players:[player], started:false, state:null
+      hostId:socket.id, players:[player], started:false, phase:"lobby", state:null
     };
     rooms.set(id,r); socket.join(id); socket.data.roomId=id;
     ack({ok:true,room:publicRoom(r),state:r.state});
@@ -102,11 +102,20 @@ io.on("connection", socket => {
     const p=r.players.find(p=>p.id===socket.id);
     if(!p) return ack({ok:false,error:"참가자를 찾을 수 없습니다."});
     if(!["fortune","capturer","guardian","swift"].includes(augment)) return ack({ok:false,error:"올바르지 않은 증강입니다."});
-    if(r.started && p.augmentLocked) return ack({ok:false,error:"첫 윷을 던진 뒤에는 증강을 바꿀 수 없습니다."});
+    if(r.started && r.phase !== "augment") return ack({ok:false,error:"증강 선택 단계가 끝났습니다."});
     p.augment=augment;
-    if(r.started && r.state) { logState(r,`${p.name}이(가) 증강 [${augment}]을 선택했습니다.`); emitRoom(r); broadcastGame(r); }
-    else { if(p.id!==r.hostId) p.ready=false; emitRoom(r); }
-    ack({ok:true});
+    if(r.started && r.state) {
+      p.augmentLocked=true;
+      const sp=r.state.players.find(x=>x.id===p.id);
+      if(sp) sp.augment=augment;
+      logState(r,`${p.name}이(가) 증강 [${augment}]을 선택했습니다.`);
+      if(r.players.every(x=>!!x.augment)) {
+        r.phase="playing";
+        logState(r,"모든 플레이어가 증강을 선택했습니다. 게임을 시작합니다!");
+      }
+      emitRoom(r); broadcastGame(r);
+    } else { if(p.id!==r.hostId) p.ready=false; emitRoom(r); }
+    ack({ok:true, phase:r.phase});
   });
 
   socket.on("player:ready", (ready, ack) => {
@@ -125,8 +134,8 @@ io.on("connection", socket => {
     if(r.started) return ack({ok:false,error:"이미 시작했습니다."});
     if(r.players.length<2) return ack({ok:false,error:"게임 시작에는 최소 2명이 필요합니다."});
     if(!r.players.every(p=>p.ready)) return ack({ok:false,error:"모든 참가자가 준비해야 합니다."});
-    r.started=true; r.state=initState(r);
-    logState(r,"게임이 시작되었습니다.");
+    r.started=true; r.phase="augment"; r.state=initState(r);
+    logState(r,"증강 선택 단계입니다. 각자 증강을 고른 뒤 확정하세요.");
     emitRoom(r); broadcastGame(r); ack({ok:true});
   });
 
@@ -134,6 +143,7 @@ io.on("connection", socket => {
     ack = safeAck(ack);
     const r=rooms.get(socket.data.roomId);
     if(!r||!r.started||r.state.gameOver) return ack({ok:false,error:"게임을 진행할 수 없습니다."});
+    if(r.phase !== "playing") return ack({ok:false,error:"모든 플레이어가 증강을 선택할 때까지 기다려 주세요."});
     const p=currentPlayer(r);
     if(p.id!==socket.id) return ack({ok:false,error:"현재 차례가 아닙니다."});
     if(r.state.currentResult) return ack({ok:false,error:"선택한 결과로 먼저 말을 이동하세요."});
@@ -166,6 +176,7 @@ io.on("connection", socket => {
     ack = safeAck(ack);
     const r=rooms.get(socket.data.roomId);
     if(!r||!r.started||r.state.gameOver) return ack({ok:false,error:"게임을 진행할 수 없습니다."});
+    if(r.phase !== "playing") return ack({ok:false,error:"증강 선택이 끝날 때까지 기다려 주세요."});
     if(currentPlayer(r).id!==socket.id) return ack({ok:false,error:"현재 차례가 아닙니다."});
     const i=Number(index);
     if(!Number.isInteger(i)||i<0||i>=r.state.pending.length) return ack({ok:false,error:"결과 선택이 올바르지 않습니다."});
@@ -177,6 +188,7 @@ io.on("connection", socket => {
     ack = safeAck(ack);
     const r=rooms.get(socket.data.roomId);
     if(!r||!r.started||r.state.gameOver) return ack({ok:false,error:"게임을 진행할 수 없습니다."});
+    if(r.phase !== "playing") return ack({ok:false,error:"증강 선택이 끝날 때까지 기다려 주세요."});
     const p=currentPlayer(r), idx=Number(pieceIndex), res=r.state.currentResult;
     if(!p.augment) return ack({ok:false,error:"먼저 게임 화면에서 증강을 선택하세요."});
     if(p.id!==socket.id) return ack({ok:false,error:"현재 차례가 아닙니다."});
@@ -230,6 +242,7 @@ io.on("connection", socket => {
     ack = safeAck(ack);
     const r=rooms.get(socket.data.roomId);
     if(!r||!r.started||r.state.gameOver) return ack({ok:false,error:"턴을 종료할 수 없습니다."});
+    if(r.phase !== "playing") return ack({ok:false,error:"증강 선택이 끝날 때까지 기다려 주세요."});
     if(currentPlayer(r).id!==socket.id) return ack({ok:false,error:"현재 차례가 아닙니다."});
     if(r.state.currentResult || r.state.pending.length) return ack({ok:false,error:"나온 윷 결과를 먼저 사용하세요."});
     if(r.state.extraRolls>0) return ack({ok:false,error:`추가 던지기 ${r.state.extraRolls}회가 남아 있어 턴을 종료할 수 없습니다.`});
