@@ -160,7 +160,7 @@ io.on("connection", socket => {
       r.state.currentResult=null;
       r.state.extraRolls=0;
       logState(r,`${p.name}: 빽도 — 판 위에 말이 없어 턴을 넘깁니다.`);
-      nextTurn();
+      nextTurn(r);
       logState(r,`${currentPlayer(r).name} 차례`);
       broadcastGame(r);
       return ack({ok:true,result,skipped:true});
