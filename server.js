@@ -18,7 +18,7 @@ function publicRoom(r) {
   return {
     id:r.id, name:r.name, mode:r.mode, maxPlayers:r.maxPlayers,
     pieceCount:r.pieceCount, hasPassword:!!r.password,
-    players:r.players.map(p=>({id:p.id,name:p.name,ready:p.ready,host:p.id===r.hostId})),
+    players:r.players.map(p=>({id:p.id,name:p.name,ready:p.ready,host:p.id===r.hostId,augment:p.augment||null})),
     started:r.started, code:r.id
   };
 }
@@ -34,7 +34,7 @@ function initState(r) {
     turnIndex:0, pending:[], currentResult:null, extraRolls:0, gameOver:false, winner:null,
     players:r.players.map((p,i)=>({
       id:p.id,name:p.name,color:["#5aa9ff","#ff6868","#65d79a","#ffd064","#c78aff","#ff9d52","#5de0d5","#eee"][i],
-      pieces:Array(r.pieceCount).fill(null), finished:0, augment:["fortune","capturer","guardian","swift"][i%4], augmentUsed:false, shieldUsed:false
+      pieces:Array(r.pieceCount).fill(null), finished:0, augment:p.augment||null, augmentUsed:false, shieldUsed:false
     })),
     lastRoll:null, log:[`${r.name} 방이 시작되었습니다.`]
   };
@@ -67,7 +67,7 @@ io.on("connection", socket => {
     const maxPlayers=Math.max(2,Math.min(8,Number(data.maxPlayers)||4));
     const pieceCount=Math.max(1,Math.min(4,Number(data.pieceCount)||4));
     const id=code();
-    const player={id:socket.id,name:cleanName(data.playerName,"플레이어"),ready:true};
+    const player={id:socket.id,name:cleanName(data.playerName,"플레이어"),ready:true,augment:null};
     const r={
       id,name:cleanName(data.name,"새 윷놀이 방"),
       mode:data.mode==="team"?"team":"solo",
@@ -90,9 +90,22 @@ io.on("connection", socket => {
     if(r.privacy==="private" && data.password!==r.password) return ack({ok:false,error:"비밀번호가 틀렸습니다."});
     if(r.password && data.password!==r.password) return ack({ok:false,error:"비밀번호가 틀렸습니다."});
     if(r.players.some(p=>p.id===socket.id)) return ack({ok:true,room:publicRoom(r),state:r.state});
-    r.players.push({id:socket.id,name:cleanName(data.playerName,"플레이어"),ready:false});
+    r.players.push({id:socket.id,name:cleanName(data.playerName,"플레이어"),ready:false,augment:null});
     socket.join(r.id); socket.data.roomId=r.id;
     ack({ok:true,room:publicRoom(r),state:r.state}); emitRoom(r);
+  });
+
+  socket.on("player:augment", (augment, ack) => {
+    ack = safeAck(ack);
+    const r=rooms.get(socket.data.roomId);
+    if(!r||r.started) return ack({ok:false,error:"게임 시작 전 대기실에서만 증강을 선택할 수 있습니다."});
+    const p=r.players.find(p=>p.id===socket.id);
+    if(!p) return ack({ok:false,error:"참가자를 찾을 수 없습니다."});
+    if(!["fortune","capturer","guardian","swift"].includes(augment)) return ack({ok:false,error:"올바르지 않은 증강입니다."});
+    p.augment=augment;
+    // Changing a selection requires the player to confirm readiness again.
+    if(p.id!==r.hostId) p.ready=false;
+    emitRoom(r); ack({ok:true});
   });
 
   socket.on("player:ready", (ready, ack) => {
@@ -111,6 +124,7 @@ io.on("connection", socket => {
     if(r.started) return ack({ok:false,error:"이미 시작했습니다."});
     if(r.players.length<2) return ack({ok:false,error:"게임 시작에는 최소 2명이 필요합니다."});
     if(!r.players.every(p=>p.ready)) return ack({ok:false,error:"모든 참가자가 준비해야 합니다."});
+    if(!r.players.every(p=>["fortune","capturer","guardian","swift"].includes(p.augment))) return ack({ok:false,error:"모든 참가자가 증강을 선택해야 합니다."});
     r.started=true; r.state=initState(r);
     logState(r,"게임이 시작되었습니다.");
     emitRoom(r); broadcastGame(r); ack({ok:true});
@@ -122,7 +136,8 @@ io.on("connection", socket => {
     if(!r||!r.started||r.state.gameOver) return ack({ok:false,error:"게임을 진행할 수 없습니다."});
     const p=currentPlayer(r);
     if(p.id!==socket.id) return ack({ok:false,error:"현재 차례가 아닙니다."});
-    if(r.state.currentResult || r.state.pending.length) return ack({ok:false,error:"먼저 나온 윷 결과를 사용해 말을 이동하세요."});
+    if(r.state.currentResult) return ack({ok:false,error:"선택한 결과로 먼저 말을 이동하세요."});
+    if(r.state.extraRolls<=0 && r.state.pending.length) return ack({ok:false,error:"남은 윷 결과 중 하나를 먼저 사용하세요."});
     if(r.state.extraRolls>0) r.state.extraRolls--;
     const result=rollResult(p);
     r.state.lastRoll=result;
@@ -161,6 +176,7 @@ io.on("connection", socket => {
     const r=rooms.get(socket.data.roomId);
     if(!r||!r.started||r.state.gameOver) return ack({ok:false,error:"게임을 진행할 수 없습니다."});
     const p=currentPlayer(r), idx=Number(pieceIndex), res=r.state.currentResult;
+    if(!p.augment) return ack({ok:false,error:"증강을 선택하지 않았습니다. 방을 다시 시작해 주세요."});
     if(p.id!==socket.id) return ack({ok:false,error:"현재 차례가 아닙니다."});
     if(!res) return ack({ok:false,error:"먼저 이동할 결과를 선택하세요."});
     if(!Number.isInteger(idx)||idx<0||idx>=p.pieces.length) return ack({ok:false,error:"말 선택이 올바르지 않습니다."});
