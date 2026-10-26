@@ -1,6 +1,6 @@
 from playwright.sync_api import sync_playwright
 from pathlib import Path
-html=Path('/mnt/data/yutcheck/public/index.html').read_text()
+html=Path(__file__).resolve().parent / 'public' / 'index.html'.read_text()
 html=html.replace('<script src="/socket.io/socket.io.js"></script><script>', '''<script>
 window.__fakeHandlers={}; window.__fakeSent=[]; window.__fakeAck=null;
 window.io=function(){return {id:'A',on:(e,f)=>{window.__fakeHandlers[e]=f;if(e==='connect')setTimeout(f,0)},emit:(e,d,ack)=>{window.__fakeSent.push({event:e,data:d});if(ack){let res={ok:true,phase:'augment'};if(e==='player:augment'){window.__fakeAck=d;res.phase=window.__phaseAfterPick||'augment'}ack(res)}}}};
